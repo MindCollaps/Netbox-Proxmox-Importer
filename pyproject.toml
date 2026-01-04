@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netbox_proxmox_import"
+version = "1.1.3"
+description = "NetBox plugin to import Proxmox Cluster information."
+requires-python = ">=3.6"
+authors = [
+    {name="Marcus VRP", email="mvreisdoefer@inf.ufpr.br"},
+]
+dependencies = ["proxmoxer"]
+
+[project.urls]
+"Homepage" = "https://gitlab.c3sl.ufpr.br/root/netbox-proxmox-sync"
+"Repository" = "https://gitlab.c3sl.ufpr.br/root/netbox-proxmox-sync"
+
+[tool.setuptools.package-data]
+"netbox_proxmox_import" = ["templates/**/*.html"]
