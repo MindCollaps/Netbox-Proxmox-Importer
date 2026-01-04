@@ -33,6 +33,17 @@ class NetBoxParser:
             })
         return nb_tags
 
+    def parse_nodes(self, px_node_list):
+        nb_nodes = []
+        for node in px_node_list:
+            nb_nodes.append({
+                "name": node["name"],
+                "status": "active" if node["status"] == "online" else "offline",
+                "cluster": {"name": self.connection.cluster.name},
+                "interfaces": node.get("interfaces", [])
+            })
+        return nb_nodes
+
     def parse_vms(self, px_vm_list):
         nb_vms = []
         for vm in px_vm_list:
@@ -78,6 +89,8 @@ class NetBoxParser:
                 "mac_address": mac.upper() if mac else None,
                 "mode": "access",
                 "ip_addresses": px_interface.get("ips", []),
+                "bridge": px_interface.get("bridge"),
+                "node": px_interface.get("node"),
             }
             
             if vlanid is not None:

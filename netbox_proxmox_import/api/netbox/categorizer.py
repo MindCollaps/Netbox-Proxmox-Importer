@@ -50,6 +50,29 @@ class NetBoxCategorizer:
             return True
         return px_tag["color"] == nb_tag.color
 
+    def categorize_nodes(self, parsed_nodes):
+        # We only create/update nodes, never delete (too dangerous)
+        existing_devices = Device.objects.filter(cluster_id=self.connection.cluster.id)
+        existing_devices_by_name = {d.name: d for d in existing_devices}
+        
+        create = []
+        update = []
+        
+        for px_node in parsed_nodes:
+            if px_node["name"] not in existing_devices_by_name:
+                create.append(px_node)
+            else:
+                nb_node = existing_devices_by_name[px_node["name"]]
+                # Always update to ensure interfaces are synced
+                update.append({"before": nb_node, "after": px_node})
+                
+        return {
+            "create": create,
+            "update": update,
+            "delete": [],
+            "warnings": []
+        }
+
     def categorize_vms(self, parsed_vms):
         devices_by_name = {
             device.name: device for device in Device.objects.filter(cluster_id=self.connection.cluster.id)
@@ -152,10 +175,17 @@ class NetBoxCategorizer:
 
     def categorize_vminterfaces(self, parsed_vminterfaces):
         existing_vms = VirtualMachine.objects.filter(cluster_id=self.connection.cluster.id)
+        existing_vminterfaces = VMInterface.objects.filter(virtual_machine__in=existing_vms).prefetch_related('mac_addresses')
+        
         existing_vminterfaces_by_name = {
-            vmi.name: vmi for vmi in \
-            VMInterface.objects.filter(virtual_machine__in=existing_vms)
+            vmi.name: vmi for vmi in existing_vminterfaces
         }
+        
+        existing_vminterfaces_by_mac = {}
+        for vmi in existing_vminterfaces:
+            for mac in vmi.mac_addresses.all():
+                existing_vminterfaces_by_mac[str(mac.mac_address).upper()] = vmi
+
         vlans_by_vid = {vlan.vid: vlan for vlan in VLAN.objects.all()}
 
         create = []
@@ -164,27 +194,48 @@ class NetBoxCategorizer:
 
         names_to_create = set()
         names_to_update = set()
+        
+        matched_ids = set()
 
         for px_vmi in parsed_vminterfaces:
-            if px_vmi["name"] not in existing_vminterfaces_by_name:
+            nb_vmi = None
+            
+            # 1. Try to match by MAC Address
+            px_mac = str(px_vmi.get("mac_address", "")).upper()
+            if px_mac and px_mac in existing_vminterfaces_by_mac:
+                nb_vmi = existing_vminterfaces_by_mac[px_mac]
+
+            # 2. Try to match by Name
+            if not nb_vmi and px_vmi["name"] in existing_vminterfaces_by_name:
+                nb_vmi = existing_vminterfaces_by_name[px_vmi["name"]]
+
+            if not nb_vmi:
                 if px_vmi["name"] not in names_to_create:
                     # Not sure why yet, but randomly proxmox sends me duplicated stuff
                     # (maybe in between migrations it gets messed up?)
                     names_to_create.add(px_vmi["name"])
                     create.append(px_vmi)
                     continue
-            nb_vmi = existing_vminterfaces_by_name[px_vmi["name"]]
+            
+            matched_ids.add(nb_vmi.pk)
+            
             if not self._vminterfaces_equal(px_vmi, nb_vmi, vlans_by_vid):
                 if px_vmi["name"] not in names_to_update:
                     names_to_update.add(px_vmi["name"])
                     update.append({"before": nb_vmi, "after": px_vmi})
 
-        existing_vminterfaces_set = set(existing_vminterfaces_by_name.keys())
-        parsed_vminterfaces_set = set(vmi["name"] for vmi in parsed_vminterfaces)
-        deleted_vminterfaces_set = existing_vminterfaces_set - parsed_vminterfaces_set
+        for vmi in existing_vminterfaces:
+            if vmi.pk not in matched_ids:
+                # Skip deletion for interfaces that look like VPN/Software interfaces
+                # e.g. wg*, tun*, lo*, or interfaces without MAC (often virtual)
+                if vmi.name.startswith(('wg', 'tun', 'lo', 'enc')):
+                    continue
+                
+                # Also skip if it has a description indicating it's managed by OPNsense/WireGuard
+                if vmi.description and ('WireGuard' in vmi.description or 'OPNsense' in vmi.description):
+                    continue
 
-        for vmi_name in deleted_vminterfaces_set:
-            delete.append(existing_vminterfaces_by_name[vmi_name])
+                delete.append(vmi)
 
         return {
             "create": create,
@@ -219,6 +270,21 @@ class NetBoxCategorizer:
             return False
         if px_vmi["virtual_machine"]["name"] != nb_vmi.virtual_machine.name:
             return False
+        
+        # Check Cabling
+        if px_vmi.get("bridge"):
+            # Check if cable exists using CableTermination lookup (safest method)
+            from dcim.models import CableTermination
+            from django.contrib.contenttypes.models import ContentType
+            
+            vmi_ct = ContentType.objects.get_for_model(VMInterface)
+            has_cable = CableTermination.objects.filter(
+                termination_type=vmi_ct, 
+                termination_id=nb_vmi.pk
+            ).exists()
+
+            if not has_cable:
+                return False
         
         px_mac = str(px_vmi["mac_address"]).upper()
         nb_macs = [str(m.mac_address).upper() for m in nb_vmi.mac_addresses.all()]

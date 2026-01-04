@@ -54,6 +54,10 @@ def sync_cluster(connection_id):
         parsed_data = parse_proxmox_data(proxmox_connection, proxmox_data)
         categorized_data = categorize_operations(proxmox_connection, parsed_data)
         returned = update_netbox(proxmox_connection, categorized_data)
+        
+        # Update Nodes separately
+        updater = NetBoxUpdater(proxmox_connection)
+        updater.update_nodes(categorized_data["nodes"])
 
         end = time.time()
         elapsed = end - start
@@ -82,6 +86,7 @@ def get_proxmox_data(proxmox_connection):
     return {
         "cluster": px.get_cluster(),
         "tags": px.get_tags(),
+        "nodes": px.get_nodes(),
         "vms": px.get_vms(),
         "vminterfaces": px.get_vminterfaces(),
     }
@@ -90,6 +95,7 @@ def parse_proxmox_data(connection, proxmox_data):
     nb = NetBoxParser(connection)
     return {
         "tags": nb.parse_tags(proxmox_data["tags"]),
+        "nodes": nb.parse_nodes(proxmox_data["nodes"]),
         "vms": nb.parse_vms(proxmox_data["vms"]),
         "vminterfaces": nb.parse_vminterfaces(proxmox_data["vminterfaces"]),
     }
@@ -98,6 +104,7 @@ def categorize_operations(connection, parsed_data):
     nb = NetBoxCategorizer(connection)
     return {
         "tags": nb.categorize_tags(parsed_data["tags"]),
+        "nodes": nb.categorize_nodes(parsed_data["nodes"]),
         "vms": nb.categorize_vms(parsed_data["vms"]),
         "vminterfaces": nb.categorize_vminterfaces(parsed_data["vminterfaces"]),
     }

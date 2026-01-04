@@ -71,6 +71,32 @@ class Proxmox:
             logger.exception("Failed to retrieve cluster status from Proxmox")
             raise e
 
+    def get_nodes(self):
+        try:
+            nodes = self.proxmox.nodes.get()
+            node_list = []
+            for node in nodes:
+                # Fetch network interfaces for the node
+                try:
+                    network_interfaces = self.proxmox.nodes(node['node']).network.get()
+                except Exception:
+                    network_interfaces = []
+                
+                node_data = {
+                    "name": node['node'],
+                    "status": node.get('status', 'unknown'),
+                    "cpu": node.get('cpu', 0),
+                    "maxcpu": node.get('maxcpu', 0),
+                    "mem": node.get('mem', 0),
+                    "maxmem": node.get('maxmem', 0),
+                    "interfaces": network_interfaces
+                }
+                node_list.append(node_data)
+            return node_list
+        except Exception as e:
+            logger.exception("Failed to retrieve Nodes from Proxmox")
+            return []
+
     def get_vms(self):
         try:
             vm_resources = self.proxmox.cluster.resources.get(type="vm")
@@ -149,11 +175,17 @@ class Proxmox:
                 if is_debug() and ips:
                     logger.info(f"VM {vm_config.get('name')} - Interface {key} - IPs found: {ips}")
 
+                # Extract Bridge
+                bridge_match = re.search(r"bridge=([a-zA-Z0-9]+)", vm_config[key])
+                bridge = bridge_match.group(1) if bridge_match else None
+
                 self.vminterfaces.append({
                     "vm": vm_config["name"],
+                    "node": vm_config.get("node"),
                     "name": f"{vm_config['name']}:{key}",
                     "info": vm_config[key],
-                    "ips": ips
+                    "ips": ips,
+                    "bridge": bridge
                 })
 
     def get_vminterfaces(self):

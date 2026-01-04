@@ -13,6 +13,20 @@ imports it into NetBox. It simply imports the data over nicely.
 * Automatically updates device and node information at regular intervals (maybe? I'll see about that).
 * **IP Address Sync**: Syncs IP addresses from VMs to NetBox interfaces (requires QEMU Guest Agent).
 
+## Topology & Cabling
+
+This plugin automatically models the physical-to-virtual network topology, enabling compatibility with topology visualization plugins (like `netbox-topology-views`).
+
+**How it works:**
+1.  **Proxmox Node Device**: You must create a Device in NetBox representing your Proxmox Node.
+2.  **Bridge Interface**: The plugin ensures the bridge interface (e.g., `vmbr0`) exists on the Node Device.
+3.  **Tap Interfaces**: For each VM interface, the plugin creates a corresponding "Tap" interface on the Node Device (e.g., `tap100i0`).
+    *   This Tap interface is bridged to the main Bridge interface.
+4.  **Cabling**: The plugin creates a **Cable** connecting the VM Interface (`net0`) to the Node's Tap Interface (`tap100i0`).
+
+**Visualization Chain:**
+`VM Interface` <--> **Cable** <--> `Node Tap Interface` --> `Bridged to` --> `Node Bridge Interface`
+
 ## Prerequisites
 
 ### QEMU Guest Agent (for IP Sync)
@@ -79,24 +93,56 @@ If you are creating a custom role, ensure it has:
 *   `VM.Monitor`
 *   `Sys.Audit`
 
-### NetBox Docker
+### NetBox Docker (Docker Compose)
 
-If you are using NetBox Docker, you should create a custom Docker image.
+If you are using `netbox-docker` and want to install the plugin without building a custom image, you can use the "Startup Script" method with `docker-compose`.
 
-1. Create a `Dockerfile` in the root of this repository:
+1.  **Prepare the files:**
+    *   Download the plugin zip file (e.g., `netbox-proxmox-import.zip`) to your server.
+    *   Create a `plugin_requirements.txt` file in the same folder as your `docker-compose.yml`:
+        ```text
+        /opt/netbox/netbox-proxmox-import.zip
+        ```
 
-   ```dockerfile
-   FROM netboxcommunity/netbox:latest
+2.  **Update `docker-compose.override.yml`:**
+    Mount the files and override the entrypoint to install the plugin on startup.
 
-   COPY . /source
-   RUN /opt/netbox/venv/bin/pip install /source
-   ```
+    ```yaml
+    services:
+      netbox:
+        user: root
+        volumes:
+          - ./netbox-proxmox-import.zip:/opt/netbox/netbox-proxmox-import.zip
+          - ./plugin_requirements.txt:/opt/netbox/plugin_requirements.txt
+        entrypoint:
+          - /bin/bash
+          - -c
+          - |
+            # Install plugin using uv (faster) or pip
+            source /opt/netbox/venv/bin/activate
+            uv pip install -r /opt/netbox/plugin_requirements.txt
+            # Launch NetBox
+            /opt/netbox/docker-entrypoint.sh /opt/netbox/launch-netbox.sh
 
-2. Build and use this image instead of the standard `netboxcommunity/netbox`.
+      netbox-worker:
+        user: root
+        volumes:
+          - ./netbox-proxmox-import.zip:/opt/netbox/netbox-proxmox-import.zip
+          - ./plugin_requirements.txt:/opt/netbox/plugin_requirements.txt
+        entrypoint:
+          - /bin/bash
+          - -c
+          - |
+            source /opt/netbox/venv/bin/activate
+            uv pip install -r /opt/netbox/plugin_requirements.txt
+            # Launch Worker
+            /opt/netbox/docker-entrypoint.sh /opt/netbox/venv/bin/python /opt/netbox/netbox/manage.py rqworker
+    ```
 
-   ```bash
-   docker build -t my-netbox-with-plugin .
-   ```
+3.  **Restart Containers:**
+    ```bash
+    docker-compose up -d --force-recreate
+    ```
 
 #### Troubleshooting Connectivity (VPN/Firewall)
 

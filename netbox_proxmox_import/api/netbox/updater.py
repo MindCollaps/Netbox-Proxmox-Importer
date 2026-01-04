@@ -3,10 +3,15 @@ from django.core.exceptions import ObjectDoesNotExist
 from django.core.serializers import serialize
 from django.contrib.contenttypes.models import ContentType
 from extras.models import Tag
-from dcim.models import Device, MACAddress
+from dcim.models import Device, MACAddress, Interface, Cable, DeviceRole, DeviceType, Manufacturer, Site
+from dcim.models import CableTermination
 from virtualization.models import VirtualMachine, VMInterface
 from ipam.models import VLAN, IPAddress
 
+
+import logging
+
+logger = logging.getLogger(__name__)
 
 class NetBoxUpdater:
     def __init__(self, proxmox_connection):
@@ -67,6 +72,68 @@ class NetBoxUpdater:
             "errors": [str(e) for e in errors],
             "warnings": categorized_tags["warnings"]
         }
+
+    def update_nodes(self, categorized_nodes):
+        # Ensure basic requirements exist
+        role, _ = DeviceRole.objects.get_or_create(name="Server", slug="server", defaults={"color": "0000ff"})
+        manufacturer, _ = Manufacturer.objects.get_or_create(name="Proxmox", slug="proxmox")
+        dtype, _ = DeviceType.objects.get_or_create(
+            model="Proxmox Node", 
+            slug="proxmox-node", 
+            manufacturer=manufacturer,
+            defaults={"u_height": 1}
+        )
+        # Use the first site found or create one if needed (fallback)
+        site = Site.objects.first()
+        if not site:
+            site = Site.objects.create(name="Default Site", slug="default-site")
+
+        for node in categorized_nodes["create"]:
+            try:
+                device = Device.objects.create(
+                    name=node["name"],
+                    device_type=dtype,
+                    role=role,
+                    site=site,
+                    cluster=self.connection.cluster,
+                    status=node["status"]
+                )
+                self._sync_node_interfaces(device, node["interfaces"])
+            except Exception:
+                pass
+        
+        for node in categorized_nodes["update"]:
+            try:
+                device = node["before"]
+                device.status = node["after"]["status"]
+                device.cluster = self.connection.cluster # Ensure cluster association
+                device.save()
+                self._sync_node_interfaces(device, node["after"]["interfaces"])
+            except Exception:
+                pass
+
+    def _sync_node_interfaces(self, device, interfaces):
+        if not interfaces: return
+        
+        for iface in interfaces:
+            iface_name = iface.get('iface')
+            if not iface_name: continue
+            
+            if_type = "virtual"
+            if iface.get('type') == 'eth': if_type = "1000base-t"
+            elif iface.get('type') == 'bridge': if_type = "bridge"
+            elif iface.get('type') == 'bond': if_type = "lag"
+            
+            nb_iface = Interface.objects.filter(device=device, name=iface_name).first()
+            if not nb_iface:
+                nb_iface = Interface.objects.create(
+                    device=device,
+                    name=iface_name,
+                    type=if_type
+                )
+            
+            # Update bridge/bond relationships if needed?
+            # For now just ensuring existence is enough for the topology linker
 
     def update_vms(self, categorized_vms):
         errors = []
@@ -169,6 +236,7 @@ class NetBoxUpdater:
                     )
                 
                 self._update_ips(new_vmi, vmi.get("ip_addresses", []))
+                self._update_cable(new_vmi, vmi.get("name"), vmi.get("node"), vmi.get("bridge"))
                 
                 created.append(new_vmi)
             except Exception as e:
@@ -202,6 +270,7 @@ class NetBoxUpdater:
                     ).delete()
 
                 self._update_ips(updated_vmi, vmi["after"].get("ip_addresses", []))
+                self._update_cable(updated_vmi, vmi["after"].get("name"), vmi["after"].get("node"), vmi["after"].get("bridge"))
 
                 updated.append(updated_vmi)
             except Exception as e:
@@ -280,6 +349,119 @@ class NetBoxUpdater:
                 ip_obj.assigned_object_id = None
                 ip_obj.save()
 
+    def _update_cable(self, vmi, px_iface_name, node_name, bridge_name):
+        if not bridge_name:
+            return
+
+        # Try to get device from VM first (most reliable if user renamed device)
+        device = vmi.virtual_machine.device
+        
+        # Fallback to node_name lookup
+        if not device and node_name:
+            device = Device.objects.filter(name=node_name).first()
+            if not device:
+                device = Device.objects.filter(name__iexact=node_name).first()
+        
+        if not device:
+            logger.warning(f"Could not determine Device for VM {vmi.virtual_machine.name} (Node: {node_name}) - Cabling skipped.")
+            return
+
+        # Ensure Bridge Interface exists
+        bridge_iface = Interface.objects.filter(device=device, name=bridge_name).first()
+        if not bridge_iface:
+            # If bridge doesn't exist, we create it.
+            # But we should check if it's a valid bridge name to avoid creating garbage
+            bridge_iface = Interface.objects.create(device=device, name=bridge_name, type="bridge")
+            logger.info(f"Created missing bridge interface {bridge_name} on {device.name}")
+
+        # Determine Tap Interface Name
+        # px_iface_name format: "VMName:net0"
+        # We use the Proxmox name because the NetBox interface might have been renamed (e.g. to vtnet0)
+        iface_part = px_iface_name.split(':')[-1] # net0
+        if not iface_part.startswith('net'):
+            logger.debug(f"Proxmox Interface {px_iface_name} does not start with 'net', skipping tap creation.")
+            return
+        try:
+            net_idx = int(iface_part.replace('net', ''))
+        except ValueError:
+            logger.warning(f"Could not parse index from interface {px_iface_name}")
+            return
+            
+        # Get VMID
+        vmid = vmi.virtual_machine.custom_field_data.get('vmid')
+        if not vmid:
+            logger.warning(f"VM {vmi.virtual_machine.name} has no VMID, skipping tap creation.")
+            return
+            
+        tap_name = f"tap{vmid}i{net_idx}"
+        
+        # Find/Create Tap Interface on Node
+        tap_iface = Interface.objects.filter(device=device, name=tap_name).first()
+        if not tap_iface:
+            tap_iface = Interface.objects.create(
+                device=device, 
+                name=tap_name, 
+                type="virtual", 
+                bridge=bridge_iface,
+                description=f"Uplink for {vmi.virtual_machine.name}"
+            )
+            logger.info(f"Created tap interface {tap_name} on {device.name}")
+        else:
+            # Ensure it is bridged correctly
+            if tap_iface.bridge != bridge_iface:
+                tap_iface.bridge = bridge_iface
+                tap_iface.save()
+                logger.info(f"Updated bridge for {tap_name} to {bridge_name}")
+
+        # Check if cable already exists
+        vmi_ct = ContentType.objects.get_for_model(VMInterface)
+        iface_ct = ContentType.objects.get_for_model(Interface)
+        
+        existing_term = CableTermination.objects.filter(
+            termination_type=vmi_ct, 
+            termination_id=vmi.pk
+        ).first()
+        
+        if existing_term:
+            # Check if connected to the correct tap interface
+            cable = existing_term.cable
+            if cable:
+                # Find the other end
+                other_end = cable.terminations.exclude(pk=existing_term.pk).first()
+                if other_end and other_end.termination == tap_iface:
+                    return # Already connected correctly
+                
+                # Connected to something else, delete
+                logger.info(f"Removing incorrect cable for {vmi.name}")
+                cable.delete()
+
+        # Also check if tap interface is connected to something else
+        tap_term = CableTermination.objects.filter(
+            termination_type=iface_ct,
+            termination_id=tap_iface.pk
+        ).first()
+        if tap_term and tap_term.cable:
+            logger.info(f"Removing incorrect cable for {tap_name}")
+            tap_term.cable.delete()
+
+        try:
+            cable = Cable.objects.create(status='connected')
+            CableTermination.objects.create(
+                cable=cable, 
+                termination_type=vmi_ct, 
+                termination_id=vmi.pk, 
+                cable_end='A'
+            )
+            CableTermination.objects.create(
+                cable=cable, 
+                termination_type=iface_ct, 
+                termination_id=tap_iface.pk, 
+                cable_end='B'
+            )
+            cable.save()
+            logger.info(f"Created cable between {vmi} and {tap_iface}")
+        except Exception as e:
+            logger.error(f"Failed to create cable: {e}")
 
     def create_mac_address(self, mac_address):
         return new_mac
