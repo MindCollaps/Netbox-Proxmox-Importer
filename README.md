@@ -11,6 +11,22 @@ imports it into NetBox. It simply imports the data over nicely.
 * Supports synchronization of multiple clusters.
 * Complete management through the UI.
 * Automatically updates device and node information at regular intervals (maybe? I'll see about that).
+* **IP Address Sync**: Syncs IP addresses from VMs to NetBox interfaces (requires QEMU Guest Agent).
+
+## Prerequisites
+
+### QEMU Guest Agent (for IP Sync)
+
+To synchronize IP addresses, the **QEMU Guest Agent** must be installed and running on your VMs, and enabled in Proxmox.
+
+1.  **Enable in Proxmox**: Go to VM > Options > QEMU Guest Agent > Enable.
+2.  **Install on Guest**:
+    *   **Linux (Debian/Ubuntu)**: `sudo apt install qemu-guest-agent && sudo systemctl enable --now qemu-guest-agent`
+    *   **Linux (RHEL/CentOS)**: `sudo yum install qemu-guest-agent && sudo systemctl enable --now qemu-guest-agent`
+    *   **Linux (Arch)**: `sudo pacman -S qemu-guest-agent && sudo systemctl enable --now qemu-guest-agent`
+    *   **OPNsense**: Install `os-qemu-guest-agent` via **System > Firmware > Plugins** (enable community plugins).
+    *   **Home Assistant OS**: Built-in. Just enable "QEMU Guest Agent" in Proxmox VM Options.
+    *   **Windows**: Install the [VirtIO Drivers](https://pve.proxmox.com/wiki/Windows_VirtIO_Drivers).
 
 ## Compatibility
 
@@ -22,28 +38,46 @@ imports it into NetBox. It simply imports the data over nicely.
 
 ## Installation
 
-Regular plugin install.
+### Standard Installation (from Source/Zip)
 
-1. Download and install the package:
+1. Download the source code or the release zip file (e.g., `netbox-proxmox-importer-v1.1.3.zip`) to your NetBox server.
+
+2. Activate the NetBox virtual environment and install the package:
 
    ```bash
    source /opt/netbox/venv/bin/activate
+   # If installing from a directory:
    pip install .
+   # If installing from a zip file:
+   pip install /path/to/netbox-proxmox-importer-v1.1.5.zip
    ```
 
-2. Enable the plugin in `configuration.py`:
+3. Enable the plugin in `configuration.py`:
 
    ```python
    PLUGINS = ['netbox_proxmox_import']
    ```
 
-3. Run migrations and restart NetBox:
+4. Run migrations and restart NetBox:
 
    ```bash
    cd /opt/netbox
    ./manage.py migrate
    sudo systemctl restart netbox
    ```
+
+### Permissions
+
+The Proxmox user/token used by this plugin requires the following permissions:
+
+*   `PVEAuditor` (role): Read-only access to cluster configuration and VM settings.
+*   `VM.Monitor` (permission): Required to query the QEMU Guest Agent for IP addresses.
+
+If you are creating a custom role, ensure it has:
+*   `VM.Audit`
+*   `VM.Config.Options` (read)
+*   `VM.Monitor`
+*   `Sys.Audit`
 
 ### NetBox Docker
 
@@ -103,16 +137,27 @@ If you want to install manually inside a running container (for testing):
     uv pip install .
     ```
 
-### Debugging
+### Configuration
 
-To enable detailed debug logging (e.g., to see raw VM status data), add the following to your NetBox `configuration.py` (or `plugins.py`):
+Add the plugin configuration to your `configuration.py` (or `plugins.py`):
 
 ```python
 PLUGINS_CONFIG = {
     'netbox_proxmox_import': {
-        'debug': True,
+        'debug': True, # Enable detailed debug logging
+        'sync_interval': 300, # Sync every 300 seconds (5 minutes). Set to 0 to disable automatic sync.
     }
 }
+```
+
+### Periodic Sync
+
+You can enable automatic periodic synchronization by setting `sync_interval` in the plugin configuration (see above). This uses the NetBox background worker (RQ).
+
+Alternatively, you can run the synchronization manually or via cron using the management command:
+
+```bash
+python manage.py proxmox_sync
 ```
 
 ## Usage

@@ -1,4 +1,5 @@
 {% extends 'generic/object.html' %}
+{% load helpers %}
 {% block content %}
   <div class="row justify-content-around">
     <div class="card col-6">
@@ -7,7 +8,7 @@
         <table class="table table-hover attr-table">
           <tr>
             <th scope="row">Cluster</th>
-            <td>{{ object.cluster.get_absolute_url }}</td>
+            <td><a href="{{ object.cluster.get_absolute_url }}">{{ object.cluster }}</a></td>
           </tr>
           <tr>
             <th scope="row">Domain</th>
@@ -30,7 +31,139 @@
   </div>
   <!-------------------->
   <div class="row">
-    {% include './management_panel.html' %}
+    <div id="result-container" class="mt-4">
+        <ul class="nav nav-tabs justify-content-center" id="resultsTabs" role="tablist">
+          <li class="nav-item" role="presentation">
+            <button class="nav-link active" id="vms-tab" data-bs-toggle="tab" data-bs-target="#vms" type="button" role="tab" aria-controls="vms" aria-selected="true">VirtualMachines</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="vminterfaces-tab" data-bs-toggle="tab" data-bs-target="#vminterfaces" type="button" role="tab" aria-controls="vminterfaces" aria-selected="false">VMInterfaces</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="macs-tab" data-bs-toggle="tab" data-bs-target="#macs" type="button" role="tab" aria-controls="macs" aria-selected="false">MACs</button>
+          </li>
+          <li class="nav-item" role="presentation">
+            <button class="nav-link" id="tags-tab" data-bs-toggle="tab" data-bs-target="#tags" type="button" role="tab" aria-controls="tags" aria-selected="false">Tags</button>
+          </li>
+        </ul>
+    
+        <div class="tab-content text-center" id="resultsTabsContents">
+          <div class="tab-pane fade show active justify-content-center align-items-center" id="vms" role="tabpanel" aria-labelledby="vms-tab">Nothing to show :)</div>
+          <div class="tab-pane fade justify-content-center align-items-center" id="vminterfaces" role="tabpanel" aria-labelledby="vminterfaces-tab">Nothing to show :)</div>
+          <div class="tab-pane fade justify-content-center align-items-center" id="macs" role="tabpanel" aria-labelledby="macs-tab">Nothing to show :)</div>
+          <div class="tab-pane fade justify-content-center align-items-center" id="tags" role="tabpanel" aria-labelledby="tags-tab">Nothing to show :)</div>
+        </div>
+    </div>
+    
+    {% csrf_token %}
+    <script>
+        document.addEventListener("DOMContentLoaded", function() {
+            const button = document.getElementById("sync-proxmox-cluster");
+            button.addEventListener("click", syncCluster);
+        });
+    
+        function syncCluster() {
+            const csrftoken = document.querySelector("[name=csrfmiddlewaretoken]").value;
+            const changelogs = {
+                VMs: document.getElementById("vms"),
+                VMInterfaces: document.getElementById("vminterfaces"),
+                MACs: document.getElementById("macs"),
+                Tags: document.getElementById("tags"),
+            };
+            
+            // Show spinners
+            for (const k in changelogs)
+                changelogs[k].innerHTML = '<div class="spinner-grow justify-content-center" style="height: 3rem; width: 3rem;" role="status"></div>';
+            
+            const connection_id = "{{ object.id }}";
+            
+            fetch(`/api/plugins/nbp-sync/sync/${connection_id}`, {
+                method: "POST",
+                headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRFToken": csrftoken,
+                },
+            })
+            .then((response) => response.json())
+            .then((result) => {
+                console.log("Sync Result:", result);
+                
+                if (result.error) {
+                    throw new Error(result.error);
+                }
+
+                const data = result.data;
+                
+                // Render results directly from the API response
+                changelogs.VMs.innerHTML = renderCategory(data.vms);
+                changelogs.VMInterfaces.innerHTML = renderCategory(data.vminterfaces);
+                changelogs.Tags.innerHTML = renderCategory(data.tags);
+                changelogs.MACs.innerHTML = "MAC changes are included in VMInterfaces.";
+
+            })
+            .catch((error) => {
+                for (const k in changelogs)
+                    changelogs[k].innerHTML = `<div class="alert alert-danger">Error: ${error.message || error}</div>`;
+                console.error("Error:", error);
+            });
+        }
+
+        function renderCategory(categoryData) {
+            if (!categoryData) return "No data returned.";
+            let html = "";
+            
+            // Errors
+            if (categoryData.errors && categoryData.errors.length > 0) {
+                html += `<div class="alert alert-danger text-start"><strong>Errors:</strong><ul>`;
+                categoryData.errors.forEach(e => html += `<li>${e}</li>`);
+                html += `</ul></div>`;
+            }
+            
+            // Warnings
+            if (categoryData.warnings && categoryData.warnings.length > 0) {
+                html += `<div class="alert alert-warning text-start"><strong>Warnings:</strong><ul>`;
+                categoryData.warnings.forEach(w => html += `<li>${w}</li>`);
+                html += `</ul></div>`;
+            }
+
+            let hasChanges = false;
+            const actions = ['created', 'updated', 'deleted'];
+            const badgeClasses = {'created': 'bg-success', 'updated': 'bg-warning', 'deleted': 'bg-danger'};
+
+            actions.forEach(action => {
+                const items = categoryData[action];
+                if (items && items.length > 0) {
+                    hasChanges = true;
+                    html += `<h5 class="mt-3 text-start"><span class="badge ${badgeClasses[action]}">${action.toUpperCase()}</span> (${items.length})</h5>`;
+                    html += '<div class="table-responsive"><table class="table table-sm table-striped table-bordered">';
+                    html += '<thead><tr><th>Name</th><th>ID</th><th>Details</th></tr></thead><tbody>';
+                    
+                    items.forEach(item => {
+                        const fields = item.fields || {};
+                        const name = fields.name || item.pk || "Unknown";
+                        const pk = item.pk || "-";
+                        
+                        // Try to show some details
+                        let details = "";
+                        if (action === 'updated') {
+                            // For updated, we don't have the diff here, just the object
+                            details = "Object updated";
+                        } else if (action === 'created') {
+                            details = "Object created";
+                        } else {
+                            details = "Object deleted";
+                        }
+
+                        html += `<tr><td>${name}</td><td>${pk}</td><td>${details}</td></tr>`;
+                    });
+                    html += '</tbody></table></div>';
+                }
+            });
+            
+            if (!hasChanges && html === "") return "No changes detected.";
+            return html;
+        }
+    </script>
   </div>
   <!-------------------->
 {% endblock content %}

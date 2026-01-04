@@ -71,19 +71,36 @@ class NetBoxParser:
         nb_vminterfaces = []
         for px_interface in px_interface_list:
             mac, vlanid = self._extract_mac_vlan(px_interface["info"])
+            
             interface = {
                 "name": px_interface["name"],
                 "virtual_machine": {"name": px_interface["vm"]},
-                "mac_address": mac.upper(),
+                "mac_address": mac.upper() if mac else None,
                 "mode": "access",
-                "untagged_vlan": {"vid": int(vlanid)},
+                "ip_addresses": px_interface.get("ips", []),
             }
+            
+            if vlanid is not None:
+                interface["untagged_vlan"] = {"vid": int(vlanid)}
+            else:
+                interface["untagged_vlan"] = None
+
             nb_vminterfaces.append(interface)
         return nb_vminterfaces
 
     def _extract_mac_vlan(self, net_string):
-        mac_match = re.search(r"([0-9A-Fa-f:]{17})", net_string)
-        vlan_match = re.search(r"vmbr(\d+)", net_string)
-        mac_address = mac_match.group(1) if mac_match else None
-        vlan_id = vlan_match.group(1) if vlan_match else None
+        # Extract MAC
+        mac_match = re.search(r"([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})", net_string)
+        mac_address = mac_match.group(0) if mac_match else None
+        
+        # Extract VLAN tag (tag=X)
+        tag_match = re.search(r"tag=(\d+)", net_string)
+        if tag_match:
+            vlan_id = tag_match.group(1)
+        else:
+            # If no tag is specified, check if bridge has a number that implies VLAN? 
+            # No, vmbr0 does not mean VLAN 0. It's just a bridge name.
+            # We return None for untagged/default.
+            vlan_id = None
+            
         return mac_address, vlan_id

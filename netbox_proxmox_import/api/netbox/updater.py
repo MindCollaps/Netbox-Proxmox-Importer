@@ -5,7 +5,7 @@ from django.contrib.contenttypes.models import ContentType
 from extras.models import Tag
 from dcim.models import Device, MACAddress
 from virtualization.models import VirtualMachine, VMInterface
-from ipam.models import VLAN
+from ipam.models import VLAN, IPAddress
 
 
 class NetBoxUpdater:
@@ -156,7 +156,7 @@ class NetBoxUpdater:
                     name=vmi["name"],
                     virtual_machine=vms_by_name.get(vmi["virtual_machine"]["name"]),
                     mode=vmi["mode"],
-                    untagged_vlan=vlans_by_vid.get(vmi["untagged_vlan"]["vid"]),
+                    untagged_vlan=vlans_by_vid.get(vmi["untagged_vlan"]["vid"]) if vmi["untagged_vlan"] else None,
                 )
                 
                 if vmi["mac_address"]:
@@ -168,6 +168,8 @@ class NetBoxUpdater:
                         }
                     )
                 
+                self._update_ips(new_vmi, vmi.get("ip_addresses", []))
+                
                 created.append(new_vmi)
             except Exception as e:
                 errors.append(e)
@@ -175,7 +177,7 @@ class NetBoxUpdater:
         for vmi in categorized_vminterfaces["update"]:
             updated_vmi = vmi["before"]
             updated_vmi.mode = vmi["after"]["mode"]
-            updated_vmi.untagged_vlan = vlans_by_vid.get(vmi["after"]["untagged_vlan"]["vid"])
+            updated_vmi.untagged_vlan = vlans_by_vid.get(vmi["after"]["untagged_vlan"]["vid"]) if vmi["after"]["untagged_vlan"] else None
             updated_vmi.virtual_machine = vms_by_name.get(vmi["after"]["virtual_machine"]["name"])
             try:
                 updated_vmi.save()
@@ -198,6 +200,8 @@ class NetBoxUpdater:
                         assigned_object_type=vminterface_ct,
                         assigned_object_id=updated_vmi.pk
                     ).delete()
+
+                self._update_ips(updated_vmi, vmi["after"].get("ip_addresses", []))
 
                 updated.append(updated_vmi)
             except Exception as e:
@@ -231,6 +235,51 @@ class NetBoxUpdater:
             "errors": [str(e) for e in errors],
             "warnings": categorized_vminterfaces["warnings"],
         }
+
+    def _update_ips(self, vmi_obj, ip_list):
+        vminterface_ct = ContentType.objects.get_for_model(VMInterface)
+        
+        if not ip_list:
+            # If no IPs provided, unassign all currently assigned IPs
+            IPAddress.objects.filter(
+                assigned_object_type=vminterface_ct,
+                assigned_object_id=vmi_obj.pk
+            ).update(assigned_object_id=None, assigned_object_type=None)
+            return
+
+        current_ips = {str(ip.address): ip for ip in IPAddress.objects.filter(
+            assigned_object_type=vminterface_ct,
+            assigned_object_id=vmi_obj.pk
+        )}
+        target_ips = set(ip_list)
+        
+        # Assign/Create new IPs
+        for ip_str in target_ips:
+            if ip_str not in current_ips:
+                try:
+                    # Check if IP exists anywhere
+                    ip_obj = IPAddress.objects.filter(address=ip_str).first()
+                    if not ip_obj:
+                        ip_obj = IPAddress.objects.create(
+                            address=ip_str,
+                            status='active'
+                        )
+                    
+                    # Assign to this interface
+                    ip_obj.assigned_object_type = vminterface_ct
+                    ip_obj.assigned_object_id = vmi_obj.pk
+                    ip_obj.save()
+                except Exception as e:
+                    # Log error?
+                    pass
+
+        # Unassign removed IPs
+        for ip_str, ip_obj in current_ips.items():
+            if ip_str not in target_ips:
+                ip_obj.assigned_object_type = None
+                ip_obj.assigned_object_id = None
+                ip_obj.save()
+
 
     def create_mac_address(self, mac_address):
         return new_mac

@@ -120,10 +120,16 @@ class NetBoxCategorizer:
         if px_vm["name"] != nb_vm.name:
             return False
         if devices_by_name.get(px_vm["device"]["name"]) is None:
-            self.vm_warnings.add(
-                f"Device '{px_vm['device']['name']}' in Cluster "
-                f"'{self.connection.cluster.name}' not found!"
-            )
+            if Device.objects.filter(name=px_vm["device"]["name"]).exists():
+                self.vm_warnings.add(
+                    f"Device '{px_vm['device']['name']}' exists but is not assigned to Cluster "
+                    f"'{self.connection.cluster.name}'."
+                )
+            else:
+                self.vm_warnings.add(
+                    f"Device '{px_vm['device']['name']}' not found. Please create it and assign to Cluster "
+                    f"'{self.connection.cluster.name}'."
+                )
         elif nb_vm.device is None:
             return False
         elif px_vm["device"]["name"] != nb_vm.device.name:
@@ -188,15 +194,27 @@ class NetBoxCategorizer:
         }
 
     def _vminterfaces_equal(self, px_vmi, nb_vmi, vlans_by_vid={}):
-        if vlans_by_vid.get(px_vmi["untagged_vlan"]["vid"]) is None:
-            self.vminterface_warnings.add(
-                f"VLAN with VID={px_vmi['untagged_vlan']['vid']} "
-                "was not found!"
-            )
-        elif nb_vmi.untagged_vlan is None:
-            return False
-        elif int(px_vmi["untagged_vlan"]["vid"]) != int(nb_vmi.untagged_vlan.vid):
-            return False
+        # Check VLAN
+        px_vid = px_vmi.get("untagged_vlan", {}).get("vid") if px_vmi.get("untagged_vlan") else None
+        
+        if px_vid is not None:
+            if vlans_by_vid.get(px_vid) is None:
+                self.vminterface_warnings.add(
+                    f"VLAN with VID={px_vid} was not found!"
+                )
+                # If VLAN doesn't exist in NetBox, we can't assign it.
+                # But we should still check if other fields match.
+                # If NetBox has a VLAN assigned but Proxmox wants a non-existent one, 
+                # we technically differ, but we can't fix it.
+            elif nb_vmi.untagged_vlan is None:
+                return False
+            elif int(px_vid) != int(nb_vmi.untagged_vlan.vid):
+                return False
+        else:
+            # Proxmox has no VLAN (untagged)
+            if nb_vmi.untagged_vlan is not None:
+                return False
+
         if px_vmi["name"] != nb_vmi.name:
             return False
         if px_vmi["virtual_machine"]["name"] != nb_vmi.virtual_machine.name:
@@ -211,4 +229,12 @@ class NetBoxCategorizer:
              if px_mac not in nb_macs:
                  return False
         
+        # Check IPs
+        px_ips = set(px_vmi.get("ip_addresses", []))
+        # Use the reverse relation from IPAddress to VMInterface
+        nb_ips = set([str(ip.address) for ip in nb_vmi.ip_addresses.all()])
+        
+        if px_ips != nb_ips:
+            return False
+
         return True

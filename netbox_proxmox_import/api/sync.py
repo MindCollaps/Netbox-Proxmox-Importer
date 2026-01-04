@@ -16,6 +16,20 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+def sync_all():
+    """Sync all configured Proxmox connections."""
+    results = []
+    connections = models.ProxmoxConnection.objects.all()
+    for connection in connections:
+        try:
+            logger.info(f"Auto-syncing connection: {connection} (ID: {connection.pk})")
+            sync_cluster(connection.pk)
+            results.append(f"Synced {connection}")
+        except Exception as e:
+            logger.error(f"Failed to auto-sync connection {connection.pk}: {e}")
+            results.append(f"Failed {connection}: {e}")
+    return results
+
 def sync_cluster(connection_id):
     start = time.time()
     logger.info(f"Starting sync for cluster {connection_id}")
