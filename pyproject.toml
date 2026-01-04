@@ -8,7 +8,7 @@ version = "1.1.3"
 description = "NetBox plugin to import Proxmox Cluster information."
 requires-python = ">=3.6"
 authors = [
-    {name="Marcus VRP", email="mvreisdoefer@inf.ufpr.br"},
+    {name="Noah Elijah Till", email="nono@neoin.space"},
 ]
 dependencies = ["proxmoxer"]
 
